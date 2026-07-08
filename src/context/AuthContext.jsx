@@ -1,0 +1,101 @@
+import { createContext, useContext, useEffect, useState } from 'react'
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+} from 'firebase/auth'
+import { doc, setDoc, getDoc } from 'firebase/firestore'
+import { auth, db } from '../firebase/config'
+
+const AuthContext = createContext(null)
+
+export function AuthProvider({ children }) {
+  const [user, setUser]       = useState(null)
+  const [role, setRole]       = useState(null)
+  const [profile, setProfile] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        setUser(firebaseUser)
+        const snap = await getDoc(doc(db, 'users', firebaseUser.uid))
+        if (snap.exists()) {
+          const data = snap.data()
+          setRole(data.role)
+          setProfile(data)
+        }
+      } else {
+        setUser(null)
+        setRole(null)
+        setProfile(null)
+      }
+      setLoading(false)
+    })
+    return unsub
+  }, [])
+
+  const login = async (email, password, expectedRole) => {
+  const cred = await signInWithEmailAndPassword(auth, email, password)
+  const snap = await getDoc(doc(db, 'users', cred.user.uid))
+
+  if (!snap.exists()) {
+    await signOut(auth)
+    throw new Error('No account profile found. Please contact support.')
+  }
+
+  const data = snap.data()
+
+  if (expectedRole && data.role !== expectedRole) {
+    await signOut(auth)
+    throw new Error(
+      `This account is registered as a ${data.role}. Please use the ${data.role === 'teacher' ? 'Teacher' : 'Student'} Sign In page instead.`
+    )
+  }
+
+  setRole(data.role)
+  setProfile(data)
+  return cred
+}
+
+  const signup = async (email, password, name, role, extra = {}) => {
+    const cred = await createUserWithEmailAndPassword(auth, email, password)
+
+    // Build user data based on role
+    const userData = {
+      name,
+      email,
+      role,
+      createdAt: new Date().toISOString(),
+      profileComplete: role === 'teacher',
+    }
+
+    if (role === 'teacher') {
+      userData.schoolCode = extra.schoolCode || ''
+      userData.schoolName = extra.schoolName || ''
+    } else {
+      userData.schoolCode      = extra.schoolCode || ''
+      userData.schoolName      = extra.schoolName || ''
+      userData.studentId       = extra.studentId  || ''
+      userData.profileComplete = false
+    }
+
+    await setDoc(doc(db, 'users', cred.user.uid), userData)
+    setRole(role)
+    setProfile(userData)
+    return cred
+  }
+
+  const logout = () => signOut(auth)
+
+  return (
+    <AuthContext.Provider value={{ user, role, profile, loading, login, signup, logout }}>
+      {!loading && children}
+    </AuthContext.Provider>
+  )
+}
+
+export function useAuth() {
+  return useContext(AuthContext)
+}

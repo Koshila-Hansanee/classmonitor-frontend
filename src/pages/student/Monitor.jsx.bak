@@ -1,0 +1,449 @@
+import { useState, useRef, useEffect } from 'react'
+import { useAuth } from '../../context/AuthContext'
+import { getStudentEnrollments, studentJoinSession, updateStudentEngagement, studentLeaveSession, markAttendance } from '../../firebase/firestore'
+import * as faceapi from 'face-api.js'
+import { predictEngagement } from '../../api/monitorApi'
+
+export default function StudentMonitor() {
+  const { user, profile } = useAuth()
+  const videoRef  = useRef(null)
+  const canvasRef = useRef(null)
+
+  const [enrollments, setEnrollments]       = useState([])
+  const [selectedCourse, setSelectedCourse] = useState(null)
+  const [monitoring, setMonitoring]         = useState(false)
+  const [modelsLoaded, setModelsLoaded]     = useState(false)
+  const [loading, setLoading]               = useState(true)
+  const [error, setError]                   = useState('')
+  const [faceVerified, setFaceVerified]     = useState(false)
+  const [seconds, setSeconds]               = useState(0)
+  const [engagementLevel, setEngagementLevel] = useState('Neutral')
+  const [engagementScore, setEngagementScore] = useState(0)
+  const [faceVisible, setFaceVisible]       = useState(false)
+  const [alertMsg, setAlertMsg]             = useState('')
+  const [sessionStats, setSessionStats]     = useState({ engaged: 0, neutral: 0, distracted: 0, total: 0 })
+
+  const streamRef       = useRef(null)
+  const intervalRef     = useRef(null)
+  const timerRef        = useRef(null)
+  const noFaceTimerRef  = useRef(null)
+  const sessionIdRef    = useRef(null)
+
+  // Load models
+  useEffect(() => {
+    const load = async () => {
+      try {
+        await faceapi.nets.tinyFaceDetector.loadFromUri('/models')
+        await faceapi.nets.faceExpressionNet.loadFromUri('/models')
+        await faceapi.nets.faceLandmark68Net.loadFromUri('/models')
+        await faceapi.nets.faceRecognitionNet.loadFromUri('/models')
+        setModelsLoaded(true)
+      } catch (e) {
+        setError('Failed to load AI models.')
+      }
+      setLoading(false)
+    }
+    load()
+    return () => stopMonitoring()
+  }, [])
+
+  // Load enrollments
+  useEffect(() => {
+    if (user) {
+      getStudentEnrollments(user.uid).then((data) => {
+        setEnrollments(data)
+        if (data.length > 0) setSelectedCourse(data[0])
+      })
+    }
+  }, [user])
+
+  const startMonitoring = async () => {
+    if (!modelsLoaded)    { setError('Models not loaded yet'); return }
+    if (!selectedCourse)  { setError('Please select a course'); return }
+    setError('')
+    setFaceVerified(false)
+
+    try {
+      // Start camera
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true })
+      streamRef.current = stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        videoRef.current.play()
+      }
+
+      // Join session in Firestore
+      await studentJoinSession(user.uid, selectedCourse.courseId, profile?.name || 'Student')
+
+      // Mark attendance
+      await markAttendance(user.uid, selectedCourse.courseId, 'Present', 'student_session')
+
+      setMonitoring(true)
+      setSeconds(0)
+      setAlertMsg('')
+
+      // Timer
+      timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000)
+
+      // Detection loop every 3 seconds
+      intervalRef.current = setInterval(() => detectAndUpdate(), 3000)
+
+    } catch (e) {
+      setError('Camera access denied. Please allow camera permission.')
+    }
+  }
+
+  const stopMonitoring = async () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop())
+      streamRef.current = null
+    }
+    if (intervalRef.current)    { clearInterval(intervalRef.current);    intervalRef.current = null }
+    if (timerRef.current)       { clearInterval(timerRef.current);       timerRef.current = null }
+    if (noFaceTimerRef.current) { clearTimeout(noFaceTimerRef.current);  noFaceTimerRef.current = null }
+
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d')
+      ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
+    }
+
+    // Update Firestore — student left
+    if (selectedCourse && user) {
+      await studentLeaveSession(user.uid, selectedCourse.courseId)
+    }
+
+    setMonitoring(false)
+    setFaceVerified(false)
+    setFaceVisible(false)
+    setEngagementLevel('Neutral')
+    setEngagementScore(0)
+  }
+
+  const getEngagementLevel = (expressions) => {
+    const { happy, neutral, sad, angry, disgusted, fearful, surprised } = expressions
+    if (happy > 0.4 || surprised > 0.4) return { level: 'Engaged',    score: 90 }
+    if (neutral > 0.5)                  return { level: 'Neutral',     score: 55 }
+    return                                     { level: 'Distracted',  score: 15 }
+  }
+
+  const levelColor = (level) => {
+    if (level === 'Engaged')    return '#16A34A'
+    if (level === 'Neutral')    return '#CA8A04'
+    return '#DC2626'
+  }
+
+  const detectAndUpdate = async () => {
+    if (!videoRef.current || !canvasRef.current) return
+    const video  = videoRef.current
+    const canvas = canvasRef.current
+    canvas.width  = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+    try {
+      const detection = await faceapi
+        .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
+        .withFaceExpressions()
+
+      if (detection) {
+        setFaceVisible(true)
+        setFaceVerified(true)
+        if (noFaceTimerRef.current) { clearTimeout(noFaceTimerRef.current); noFaceTimerRef.current = null }
+        setAlertMsg('')
+
+        const { x, y, width, height } = detection.detection.box
+        
+const faceCanvas = document.createElement('canvas')
+faceCanvas.width = width
+faceCanvas.height = height
+faceCanvas.getContext('2d').drawImage(video, x, y, width, height, 0, 0, width, height)
+
+let level = 'Neutral', score = 55
+try {
+  const result = await predictEngagement(faceCanvas)
+  level = result.engagement_level
+  score = result.engagement_score
+} catch (e) {
+  console.warn('Backend prediction failed, falling back to local heuristic', e)
+  ;({ level, score } = getEngagementLevel(detection.expressions))
+}
+        const color = levelColor(level)
+
+        // Draw box
+        ctx.strokeStyle = color
+        ctx.lineWidth   = 3
+        ctx.strokeRect(x, y, width, height)
+        ctx.fillStyle   = color
+        ctx.fillRect(x, y - 28, width, 28)
+        ctx.fillStyle   = '#fff'
+        ctx.font        = 'bold 13px Inter, sans-serif'
+        ctx.fillText(level, x + 6, y - 9)
+
+        setEngagementLevel(level)
+        setEngagementScore(score)
+
+        // Update Firestore
+        await updateStudentEngagement(user.uid, selectedCourse.courseId, level, score)
+
+        // Update local stats
+        setSessionStats((prev) => ({
+          engaged:    level === 'Engaged'    ? prev.engaged + 1    : prev.engaged,
+          neutral:    level === 'Neutral'    ? prev.neutral + 1    : prev.neutral,
+          distracted: level === 'Distracted' ? prev.distracted + 1 : prev.distracted,
+          total: prev.total + 1,
+        }))
+
+      } else {
+        setFaceVisible(false)
+
+        // Start no-face timer — alert after 2 minutes
+        if (!noFaceTimerRef.current) {
+          noFaceTimerRef.current = setTimeout(() => {
+            setAlertMsg('⚠️ You have been away for 2 minutes!')
+            updateStudentEngagement(user.uid, selectedCourse.courseId, 'Distracted', 0)
+          }, 120000) // 2 minutes
+        }
+
+        // Show guide on canvas
+        ctx.strokeStyle = '#CA8A04'
+        ctx.lineWidth   = 2
+        ctx.setLineDash([8, 4])
+        ctx.strokeRect(canvas.width * 0.2, canvas.height * 0.1, canvas.width * 0.6, canvas.height * 0.8)
+        ctx.setLineDash([])
+        ctx.fillStyle = '#CA8A04'
+        ctx.font      = 'bold 14px Inter, sans-serif'
+        ctx.fillText('Please position your face in the frame', canvas.width * 0.15, canvas.height * 0.07)
+      }
+    } catch (e) {
+      console.error('Detection error:', e)
+    }
+  }
+
+  const fmt = (s) =>
+    String(Math.floor(s / 60)).padStart(2, '0') + ':' +
+    String(s % 60).padStart(2, '0')
+
+  const avgEngagement = sessionStats.total > 0
+    ? Math.round(((sessionStats.engaged * 90) + (sessionStats.neutral * 55) + (sessionStats.distracted * 15)) / sessionStats.total)
+    : 0
+
+  return (
+    <div className="wrap">
+      <div className="page-header">
+        <div>
+          <h2>Class Monitor</h2>
+          <p>Keep this page open during your class</p>
+        </div>
+        {monitoring && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.2)', borderRadius: 99, padding: '6px 14px' }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--red)', animation: 'blink 1s infinite' }} />
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--red)' }}>MONITORING · {fmt(seconds)}</span>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 20 }}>
+
+        {/* Left — Camera */}
+        <div>
+          {/* Course selector */}
+          {!monitoring && (
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Select Course</div>
+              {enrollments.length === 0 ? (
+                <div style={{ color: 'var(--text2)', fontSize: 13 }}>No enrolled courses. Enroll in a course first.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {enrollments.map((e) => (
+                    <div key={e.id}
+                      onClick={() => setSelectedCourse(e)}
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px', borderRadius: 10, cursor: 'pointer', border: '2px solid', transition: 'all .15s',
+                        borderColor: selectedCourse?.courseId === e.courseId ? '#7C3AED' : 'var(--border)',
+                        background:  selectedCourse?.courseId === e.courseId ? 'var(--purple-bg)' : 'var(--surface2)' }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700 }}>{e.courseName}</div>
+                        <div style={{ fontSize: 12, color: 'var(--text2)', marginTop: 2 }}>👨‍🏫 {e.teacherName}</div>
+                      </div>
+                      {selectedCourse?.courseId === e.courseId && (
+                        <span style={{ fontSize: 12, fontWeight: 700, color: '#7C3AED' }}>Selected ✓</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Video feed */}
+          <div style={{ position: 'relative', borderRadius: 16, overflow: 'hidden', background: '#0F1928', aspectRatio: '16/9' }}>
+            <video ref={videoRef} autoPlay muted playsInline
+              style={{ width: '100%', display: 'block', transform: 'scaleX(-1)' }} />
+            <canvas ref={canvasRef}
+              style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', transform: 'scaleX(-1)' }} />
+
+            {!monitoring && (
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0F1928' }}>
+                <div style={{ textAlign: 'center', color: '#fff' }}>
+                  <div style={{ fontSize: 52, marginBottom: 12 }}>📷</div>
+                  <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.6)' }}>
+                    {loading ? 'Loading AI models...' : 'Select a course and click Start Monitoring'}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Alert */}
+          {alertMsg && (
+            <div style={{ marginTop: 12, background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 10, padding: '12px 16px', fontSize: 13, color: 'var(--red)', fontWeight: 600 }}>
+              {alertMsg}
+            </div>
+          )}
+
+          {error && (
+            <div style={{ marginTop: 12, background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 10, padding: '12px 16px', fontSize: 13, color: 'var(--red)' }}>
+              {error}
+            </div>
+          )}
+
+          {/* Controls */}
+          <div style={{ marginTop: 16, display: 'flex', gap: 12 }}>
+            {!monitoring ? (
+              <>
+                <button onClick={startMonitoring} disabled={!modelsLoaded || loading || !selectedCourse}
+                  style={{ flex: 1, padding: '12px', background: modelsLoaded && selectedCourse ? '#16A34A' : '#4A5568', color: '#fff', borderRadius: 12, fontWeight: 800, fontSize: 14, border: 'none', cursor: 'pointer' }}>
+                  {loading ? '⏳ Loading...' : '▶ Start Monitoring'}
+                </button>
+                {selectedCourse?.zoomLink && (
+                  <a href={selectedCourse.zoomLink} target="_blank" rel="noreferrer"
+                    style={{ flex: 1, padding: '12px', background: '#1D4ED8', color: '#fff', borderRadius: 12, fontWeight: 800, fontSize: 14, textDecoration: 'none', textAlign: 'center' }}>
+                    📹 Join Zoom Class
+                  </a>
+                )}
+              </>
+            ) : (
+              <>
+                <button onClick={stopMonitoring}
+                  style={{ flex: 1, padding: '12px', background: '#DC2626', color: '#fff', borderRadius: 12, fontWeight: 800, fontSize: 14, border: 'none', cursor: 'pointer' }}>
+                  ⏹ Leave Class
+                </button>
+                {selectedCourse?.zoomLink && (
+                  <a href={selectedCourse.zoomLink} target="_blank" rel="noreferrer"
+                    style={{ flex: 1, padding: '12px', background: '#1D4ED8', color: '#fff', borderRadius: 12, fontWeight: 800, fontSize: 14, textDecoration: 'none', textAlign: 'center' }}>
+                    📹 Zoom Class
+                  </a>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Right — Stats */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+          {/* Current status */}
+          <div className="card">
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Your Status</div>
+            <div style={{ textAlign: 'center', padding: '16px 0' }}>
+              <div style={{ fontSize: 48, marginBottom: 8 }}>
+                {!monitoring
+  ? '⏸️'
+  : faceVisible
+    ? (engagementLevel === 'Engaged' ? '😊' : engagementLevel === 'Neutral' ? '😐' : '😟')
+    : '👀'}
+</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: monitoring ? levelColor(engagementLevel) : 'var(--text2)' }}>
+                {!monitoring ? 'Not Started' : faceVisible ? engagementLevel : 'Face Not Visible'}
+              </div>
+              {monitoring && (
+                <div style={{ fontSize: 28, fontWeight: 800, marginTop: 8, color: levelColor(engagementLevel) }}>
+                  {faceVisible ? engagementScore + '%' : '—'}
+                </div>
+              )}
+            </div>
+
+            {/* Face visible indicator */}
+            {monitoring && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 8, background: faceVisible ? 'var(--green-bg)' : 'var(--red-bg)' }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: faceVisible ? 'var(--green)' : 'var(--red)', animation: 'blink 1s infinite' }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: faceVisible ? 'var(--green)' : 'var(--red)' }}>
+                  {faceVisible ? 'Face detected ✓' : 'Face not visible!'}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* Attendance status */}
+          <div className="card">
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Attendance</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 10, background: faceVerified ? 'var(--green-bg)' : 'var(--surface2)' }}>
+              <div style={{ fontSize: 20 }}>{faceVerified ? '✅' : '⏳'}</div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: faceVerified ? 'var(--green)' : 'var(--text2)' }}>
+                  {faceVerified ? 'Marked Present' : 'Not yet marked'}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 1 }}>
+                  {faceVerified ? 'Your attendance is recorded' : 'Start monitoring to mark attendance'}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Session stats */}
+          {monitoring && (
+            <div className="card">
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Session Stats</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: 'var(--text2)' }}>Duration</span>
+                <span style={{ fontSize: 13, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{fmt(seconds)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: 'var(--text2)' }}>Avg Engagement</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: avgEngagement > 65 ? 'var(--green)' : avgEngagement > 40 ? 'var(--yellow)' : 'var(--red)' }}>
+                  {avgEngagement}%
+                </span>
+              </div>
+              {[
+                { label: 'Engaged',    value: sessionStats.engaged,    color: 'var(--green)' },
+                { label: 'Neutral',    value: sessionStats.neutral,    color: 'var(--yellow)' },
+                { label: 'Distracted', value: sessionStats.distracted, color: 'var(--red)' },
+              ].map((s) => (
+                <div key={s.label} style={{ marginBottom: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text2)' }}>{s.label}</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: s.color }}>
+                      {sessionStats.total > 0 ? Math.round((s.value / sessionStats.total) * 100) : 0}%
+                    </span>
+                  </div>
+                  <div style={{ background: 'var(--surface2)', borderRadius: 3, height: 5 }}>
+                    <div style={{ width: sessionStats.total > 0 ? (s.value / sessionStats.total * 100) + '%' : '0%', background: s.color, height: '100%', borderRadius: 3, transition: 'width .5s' }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Instructions */}
+          {!monitoring && (
+            <div className="card">
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>How it works</div>
+              {[
+                ['1️⃣', 'Select your course above'],
+                ['2️⃣', 'Click "Join Zoom Class" to open your class'],
+                ['3️⃣', 'Click "Start Monitoring" to begin'],
+                ['4️⃣', 'Keep your face visible in the camera'],
+                ['5️⃣', 'Click "Leave Class" when done'],
+              ].map(([icon, text]) => (
+                <div key={text} style={{ display: 'flex', gap: 10, marginBottom: 8, fontSize: 12, color: 'var(--text2)', lineHeight: 1.5 }}>
+                  <span>{icon}</span><span>{text}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <style>{`@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}`}</style>
+    </div>
+  )
+}
