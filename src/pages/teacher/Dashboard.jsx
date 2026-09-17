@@ -11,6 +11,7 @@ import {
   endSession,
   saveSessionReport,
   markAttendance,
+  buildConnectivityLog,
 } from '../../firebase/firestore'
 
 export default function Dashboard() {
@@ -67,7 +68,25 @@ export default function Dashboard() {
     timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000)
 
     unsubAttendanceRef.current = listenCourseAttendance(selectedCourse.id, sid, setAttendanceDocs)
-unsubSessionsRef.current   = listenClassSessions(selectedCourse.id, sid, setStudentSessions)
+    unsubSessionsRef.current = listenClassSessions(selectedCourse.id, sid, (newSessions) => {
+  setStudentSessions((prevSessions) => {
+    const justReconnectedIds = new Set()
+    newSessions.forEach((ns) => {
+      const prev = prevSessions.find((p) => p.studentId === ns.studentId)
+      if (prev && prev.status === 'offline' && ns.status === 'online') {
+        justReconnectedIds.add(ns.studentId)
+      }
+    })
+    const tagged = newSessions.map((ns) => ({ ...ns, justReconnected: justReconnectedIds.has(ns.studentId) }))
+    // Clear the "just reconnected" flag after 5 seconds so the green banner doesn't linger forever
+    if (justReconnectedIds.size > 0) {
+      setTimeout(() => {
+        setStudentSessions((current) => current.map((s) => (justReconnectedIds.has(s.studentId) ? { ...s, justReconnected: false } : s)))
+      }, 5000)
+    }
+    return tagged
+  })
+})
   }
 
   const stopMonitoring = async () => {
@@ -89,16 +108,20 @@ unsubSessionsRef.current   = listenClassSessions(selectedCourse.id, sid, setStud
     })
 
     const studentRecords = enrollments.map((e) => {
-      const att = attendanceDocs.find((a) => a.studentId === e.studentId)
-      const live = studentSessions.find((s) => s.studentId === e.studentId)
-      return {
-        studentId: e.studentId,
-        studentName: e.studentName || e.studentId,
-        attendanceStatus: att?.status || 'Absent',
-        engagementScore: live?.engagementScore || 0,
-        engagementLevel: live?.engagementLevel || 'Neutral',
-      }
-    })
+  const att = attendanceDocs.find((a) => a.studentId === e.studentId)
+  const live = studentSessions.find((s) => s.studentId === e.studentId)
+  const connectivityLog = live ? buildConnectivityLog(live) : []
+  return {
+    studentId: e.studentId,
+    studentName: e.studentName || e.studentId,
+    studentNumber: e.studentNumber || e.studentId,
+    attendanceStatus: att?.status || 'Absent',
+    engagementScore: live?.engagementScore || 0,
+    engagementLevel: live?.engagementLevel || 'Neutral',
+    connectivityLog,
+    finalConnectionStatus: live ? (live.status === 'online' ? 'Connected' : 'Disconnected') : 'Not Joined',
+  }
+})
 
     if (sessionId) {
       await endSession(sessionId, { durationSeconds: seconds, presentCount, avgEngagement })
@@ -187,12 +210,23 @@ unsubSessionsRef.current   = listenClassSessions(selectedCourse.id, sid, setStud
         </div>
       )}
 
-      {sessionActive && studentSessions.some((s) => s.status === 'offline') && (
-  <div style={{ marginBottom: 16, background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 10, padding: '12px 16px', fontSize: 13, color: 'var(--red)', fontWeight: 600 }}>
-    ⚠ {studentSessions.filter((s) => s.status === 'offline').length} student(s) left the session:{' '}
-    {studentSessions.filter((s) => s.status === 'offline').map((s) => s.studentName || s.studentId).join(', ')}
-  </div>
-)}
+      {sessionActive && studentSessions.filter((s) => s.status === 'offline' || s.justReconnected).map((s) => {
+  const enrolled = enrollments.find((e) => e.studentId === s.studentId)
+  const number = enrolled?.studentNumber || s.studentId
+  const name = s.studentName || enrolled?.studentName || s.studentId
+  if (s.status === 'offline') {
+    return (
+      <div key={s.studentId} style={{ marginBottom: 10, background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 10, padding: '12px 16px', fontSize: 13, color: 'var(--red)', fontWeight: 600 }}>
+        ⚠ Student {number} ({name}) has left the monitoring session.
+      </div>
+    )
+  }
+  return (
+    <div key={s.studentId} style={{ marginBottom: 10, background: 'var(--green-bg)', border: '1px solid rgba(22,163,74,0.25)', borderRadius: 10, padding: '12px 16px', fontSize: 13, color: 'var(--green)', fontWeight: 600 }}>
+      ✓ Student {number} ({name}) reconnected to the monitoring session.
+    </div>
+  )
+})}
 
       {courses.length === 0 && (
         <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--text2)' }}>
@@ -231,6 +265,45 @@ unsubSessionsRef.current   = listenClassSessions(selectedCourse.id, sid, setStud
             <div className="table-header">
               <span style={{ fontSize: 14, fontWeight: 700 }}>Student Roster — Live</span>
             </div>
+            {studentSessions.length > 0 && (
+  <div className="table-container" style={{ marginTop: 20 }}>
+    <div className="table-header">
+      <span style={{ fontSize: 14, fontWeight: 700 }}>Connectivity Log</span>
+    </div>
+    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <thead>
+        <tr style={{ background: 'var(--surface2)' }}>
+          {['Student', 'Student Number', 'Left Session', 'Reconnected', 'Duration Outside', 'Status'].map((h) => (
+            <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {studentSessions.flatMap((s) => {
+          const enrolled = enrollments.find((e) => e.studentId === s.studentId)
+          const number = enrolled?.studentNumber || s.studentId
+          const name = s.studentName || enrolled?.studentName || s.studentId
+          const log = buildConnectivityLog(s)
+          if (log.length === 0) return []
+          return log.map((row, idx) => (
+            <tr key={s.studentId + '_' + idx} style={{ borderBottom: '1px solid var(--border)' }}>
+              <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 600 }}>{name}</td>
+              <td style={{ padding: '11px 14px', fontSize: 13 }}>{number}</td>
+              <td style={{ padding: '11px 14px', fontSize: 12 }}>{new Date(row.leftAt).toLocaleTimeString()}</td>
+              <td style={{ padding: '11px 14px', fontSize: 12 }}>{row.reconnectedAt ? new Date(row.reconnectedAt).toLocaleTimeString() : 'Not Reconnected'}</td>
+              <td style={{ padding: '11px 14px', fontSize: 12 }}>{row.durationSec != null ? `${Math.floor(row.durationSec / 60)} min ${row.durationSec % 60} sec` : 'Until Session End'}</td>
+              <td style={{ padding: '11px 14px' }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: s.status === 'online' ? 'var(--green)' : 'var(--red)' }}>
+                  {s.status === 'online' ? 'Connected' : 'Disconnected'}
+                </span>
+              </td>
+            </tr>
+          ))
+        })}
+      </tbody>
+    </table>
+  </div>
+)}
             {enrollments.length === 0 ? (
               <div style={{ padding: 24, textAlign: 'center', color: 'var(--text2)', fontSize: 13 }}>
                 No students enrolled in this course yet.

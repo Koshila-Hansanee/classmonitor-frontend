@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
 import { useAuth } from '../../context/AuthContext'
-import { uploadGrades, getTeacherCourses } from '../../firebase/firestore'
+import { uploadGrades, getTeacherCourses, getGradeUploadHistory, deleteGradeUpload } from '../../firebase/firestore'
 import { useEffect } from 'react'
 import Badge from '../../components/shared/Badge'
 
@@ -17,13 +17,24 @@ export default function GradesUpload() {
   const [success, setSuccess]     = useState('')
   const [error, setError]         = useState('')
   const [uploadedCount, setUploadedCount] = useState(0)
+  const [history, setHistory] = useState([])
+  const [loadingHistory, setLoadingHistory] = useState(true)
 
   useEffect(() => {
-    getTeacherCourses(user.uid).then((data) => {
-      setCourses(data)
-      if (data.length > 0) setSelectedCourse(data[0].id)
-    })
-  }, [user])
+  getTeacherCourses(user.uid).then((data) => {
+    setCourses(data)
+    if (data.length > 0) setSelectedCourse(data[0].id)
+  })
+  refreshHistory()
+}, [user])
+
+const refreshHistory = () => {
+  setLoadingHistory(true)
+  getGradeUploadHistory(user.uid).then((data) => {
+    setHistory(data)
+    setLoadingHistory(false)
+  })
+}
 
   const handleFile = (e) => {
     const file = e.target.files[0]
@@ -70,25 +81,42 @@ export default function GradesUpload() {
   }
 
   const handleUpload = async () => {
-    if (preview.length === 0) { setError('No data to upload'); return }
-    if (!selectedCourse)      { setError('Please select a course'); return }
+  if (preview.length === 0) { setError('No data to upload'); return }
+  if (!selectedCourse)      { setError('Please select a course'); return }
 
-    setUploading(true)
-    setError('')
-    setSuccess('')
+  setUploading(true)
+  setError('')
+  setSuccess('')
 
-    try {
-      await uploadGrades(preview, user.uid, preview[0]?.subject || 'General', term)
-      setUploadedCount(preview.length)
-      setSuccess(`✅ Successfully uploaded grades for ${preview.length} students!`)
-      setPreview([])
-      setFileName('')
-      if (fileRef.current) fileRef.current.value = ''
-    } catch (e) {
-      setError('Upload failed: ' + e.message)
-    }
-    setUploading(false)
+  try {
+    const course = courses.find((c) => c.id === selectedCourse)
+    await uploadGrades(preview, user.uid, selectedCourse, course?.name || '', preview[0]?.subject || 'General', term)
+    setUploadedCount(preview.length)
+    setSuccess(`✅ Successfully uploaded grades for ${preview.length} students!`)
+    setPreview([])
+    setFileName('')
+    if (fileRef.current) fileRef.current.value = ''
+    refreshHistory()
+  } catch (e) {
+    setError('Upload failed: ' + e.message)
   }
+  setUploading(false)
+}
+
+const handleDeleteUpload = async (record) => {
+  if (!window.confirm(`Delete this upload? This will remove grades for ${record.studentCount} student(s) in ${record.subject} (${record.term}). This cannot be undone.`)) return
+  try {
+    await deleteGradeUpload(record)
+    refreshHistory()
+  } catch (e) {
+    setError('Delete failed: ' + e.message)
+  }
+}
+
+const formatDate = (ts) => {
+  if (!ts?.toMillis) return '—'
+  return new Date(ts.toMillis()).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
 
   const gradeColor = (score) => {
     if (score >= 90) return 'var(--green)'
@@ -242,6 +270,44 @@ export default function GradesUpload() {
           ))}
         </div>
       )}
+
+      <div className="table-container" style={{ marginTop: 20 }}>
+        <div className="table-header">
+          <span style={{ fontSize: 14, fontWeight: 700 }}>Upload History</span>
+        </div>
+        {loadingHistory ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--text2)', fontSize: 13 }}>Loading...</div>
+        ) : history.length === 0 ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--text2)', fontSize: 13 }}>No uploads yet.</div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ background: 'var(--surface2)' }}>
+                {['Date', 'Course', 'Subject', 'Term', 'Students', 'Action'].map((h) => (
+                  <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((h) => (
+                <tr key={h.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '11px 14px', fontSize: 13 }}>{formatDate(h.uploadedAt)}</td>
+                  <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 600 }}>{h.courseName || '—'}</td>
+                  <td style={{ padding: '11px 14px', fontSize: 13 }}>{h.subject}</td>
+                  <td style={{ padding: '11px 14px', fontSize: 13 }}>{h.term}</td>
+                  <td style={{ padding: '11px 14px', fontSize: 13 }}>{h.studentCount}</td>
+                  <td style={{ padding: '11px 14px' }}>
+                    <button onClick={() => handleDeleteUpload(h)}
+                      style={{ fontSize: 12, fontWeight: 700, color: 'var(--red)', background: 'var(--red-bg)', border: 'none', borderRadius: 6, padding: '4px 10px', cursor: 'pointer' }}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   )
 }

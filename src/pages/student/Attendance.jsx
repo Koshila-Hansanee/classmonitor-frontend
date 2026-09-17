@@ -22,21 +22,23 @@ export default function Attendance() {
       // Each report is one class session across all its enrolled students.
       // Pull out just this student's own record from each one.
       const myRecords = reports
-        .map((r) => {
-          const mine = r.studentRecords?.find((s) => s.studentId === user.uid)
-          if (!mine) return null
-          return {
-            id: r.id,
-            courseName: r.courseName,
-            date: r.date,
-            startedAt: r.startedAt,
-            endedAt: r.endedAt,
-            status: mine.attendanceStatus,
-            engagementScore: mine.engagementScore,
-            engagementLevel: mine.engagementLevel,
-          }
-        })
-        .filter(Boolean)
+  .map((r) => {
+    const mine = r.studentRecords?.find((s) => s.studentId === user.uid)
+    if (!mine) return null
+    return {
+      id: r.id,
+      courseName: r.courseName,
+      date: r.date,
+      startedAt: r.startedAt,
+      endedAt: r.endedAt,
+      status: mine.attendanceStatus,
+      engagementScore: mine.engagementScore,
+      engagementLevel: mine.engagementLevel,
+      connectivityLog: mine.connectivityLog || [],
+      finalConnectionStatus: mine.finalConnectionStatus || 'Not Joined',
+    }
+  })
+  .filter(Boolean)
 
       setRecords(myRecords)
       setLoading(false)
@@ -113,16 +115,25 @@ export default function Attendance() {
             </thead>
             <tbody>
               {records.map((r) => (
-                <tr key={r.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 600 }}>{r.courseName}</td>
-                  <td style={{ padding: '11px 14px', fontSize: 13 }}>{formatDate(r.date)}</td>
-                  <td style={{ padding: '11px 14px', fontSize: 12, color: 'var(--text2)' }}>{formatTime(r.startedAt)} – {formatTime(r.endedAt)}</td>
-                  <td style={{ padding: '11px 14px' }}><Badge type={r.status} /></td>
-                  <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 700, color: r.engagementLevel === 'Engaged' ? 'var(--green)' : r.engagementLevel === 'Neutral' ? 'var(--yellow)' : 'var(--red)' }}>
-                    {r.engagementScore}% · {r.engagementLevel}
-                  </td>
-                </tr>
-              ))}
+  <>
+    <tr key={r.id} style={{ borderBottom: r.connectivityLog.length > 0 ? 'none' : '1px solid var(--border)' }}>
+      <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 600 }}>{r.courseName}</td>
+      <td style={{ padding: '11px 14px', fontSize: 13 }}>{formatDate(r.date)}</td>
+      <td style={{ padding: '11px 14px', fontSize: 12, color: 'var(--text2)' }}>{formatTime(r.startedAt)} – {formatTime(r.endedAt)}</td>
+      <td style={{ padding: '11px 14px' }}><Badge type={r.status} /></td>
+      <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 700, color: r.engagementLevel === 'Engaged' ? 'var(--green)' : r.engagementLevel === 'Neutral' ? 'var(--yellow)' : 'var(--red)' }}>
+        {r.engagementScore}% · {r.engagementLevel}
+      </td>
+    </tr>
+    {r.connectivityLog.map((row, idx) => (
+      <tr key={r.id + '_conn_' + idx} style={{ borderBottom: idx === r.connectivityLog.length - 1 ? '1px solid var(--border)' : 'none', background: 'var(--surface2)' }}>
+        <td colSpan={5} style={{ padding: '8px 14px 8px 28px', fontSize: 12, color: 'var(--text2)' }}>
+          ⚠ Left at {new Date(row.leftAt).toLocaleTimeString()} · Reconnected: {row.reconnectedAt ? new Date(row.reconnectedAt).toLocaleTimeString() : 'Not Reconnected'} · Duration outside: {row.durationSec != null ? `${Math.floor(row.durationSec / 60)}m ${row.durationSec % 60}s` : 'Until session end'}
+        </td>
+      </tr>
+    ))}
+  </>
+))}
             </tbody>
           </table>
         )}

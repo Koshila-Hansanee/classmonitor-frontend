@@ -116,15 +116,46 @@ export const getCourseById = async (courseId) => {
 }
 
 // GRADES
-export const uploadGrades = async (gradesArray, teacherId, subject, term) => {
-  const batch = gradesArray.map((g) =>
-    setDoc(doc(db, 'grades', g.studentId + '_' + subject + '_' + term), {
+export const uploadGrades = async (gradesArray, teacherId, courseId, courseName, subject, term) => {
+  const gradeDocIds = gradesArray.map((g) => g.studentId + '_' + subject + '_' + term)
+
+  const batch = gradesArray.map((g, i) =>
+    setDoc(doc(db, 'grades', gradeDocIds[i]), {
       studentId: g.studentId, subject, term,
       grade: g.grade, score: Number(g.score),
       teacherId, updatedAt: serverTimestamp(),
     })
   )
-  return await Promise.all(batch)
+  await Promise.all(batch)
+
+
+  const uploadRef = await addDoc(collection(db, 'gradeUploads'), {
+    teacherId,
+    courseId,
+    courseName,
+    subject,
+    term,
+    studentCount: gradesArray.length,
+    gradeDocIds,
+    uploadedAt: serverTimestamp(),
+  })
+  return uploadRef.id
+}
+
+export const getGradeUploadHistory = async (teacherId) => {
+  const q = query(collection(db, 'gradeUploads'), where('teacherId', '==', teacherId))
+  const snap = await getDocs(q)
+  const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+  items.sort((a, b) => (b.uploadedAt?.toMillis?.() || 0) - (a.uploadedAt?.toMillis?.() || 0))
+  return items
+}
+
+export const deleteGradeUpload = async (uploadRecord) => {
+  // Remove every grade document this upload created, then the upload record itself.
+  await Promise.all(
+    (uploadRecord.gradeDocIds || []).map((id) => deleteDoc(doc(db, 'grades', id)))
+  )
+  await deleteDoc(doc(db, 'gradeUploads', uploadRecord.id))
 }
 
 export const getStudentGrades = async (studentId) => {
@@ -266,7 +297,21 @@ export const getAllFaceDescriptors = async (courseId) => {
 
 export const studentJoinSession = async (studentId, courseId, studentName, sessionId) => {
   const today = new Date().toISOString().split('T')[0]
-  return await setDoc(doc(db, 'studentSessions', studentId + '_' + sessionId), {
+  const docRef = doc(db, 'studentSessions', studentId + '_' + sessionId)
+  const existing = await getDoc(docRef)
+
+  if (existing.exists()) {
+    // Rejoining an already-started session — log the reconnect, don't wipe history.
+    const nowIso = new Date().toISOString()
+    await updateDoc(docRef, {
+      status: 'online',
+      lastSeen: serverTimestamp(),
+      connectionEvents: arrayUnion({ type: 'rejoined', at: nowIso }),
+    })
+    return
+  }
+
+  await setDoc(docRef, {
     studentId,
     courseId,
     sessionId,
@@ -278,6 +323,7 @@ export const studentJoinSession = async (studentId, courseId, studentName, sessi
     engagementLevel: 'Neutral',
     isVerified: false,
     date: today,
+    connectionEvents: [],
   })
 }
 
@@ -300,9 +346,11 @@ export const updateStudentEngagement = async (studentId, sessionId, engagementLe
 
 export const studentLeaveSession = async (studentId, sessionId) => {
   const docId = studentId + '_' + sessionId
+  const nowIso = new Date().toISOString()
   return await updateDoc(doc(db, 'studentSessions', docId), {
     status: 'offline',
     leftAt: serverTimestamp(),
+    connectionEvents: arrayUnion({ type: 'left', at: nowIso }),
   })
 }
 
@@ -406,6 +454,37 @@ export const updateStudentSession = async (studentId, data) => {
   }
 }
 
+// Builds a chronological connection history from a session's raw event log,
+// pairing each "left" event with the next "rejoined" event (if any) to
+// compute time spent disconnected.
+export const buildConnectivityLog = (studentSession) => {
+  const events = [...(studentSession.connectionEvents || [])].sort(
+    (a, b) => new Date(a.at) - new Date(b.at)
+  )
+
+  const rows = []
+  let pendingLeave = null
+
+  events.forEach((ev) => {
+    if (ev.type === 'left') {
+      pendingLeave = ev.at
+    } else if (ev.type === 'rejoined' && pendingLeave) {
+      const leftAt = new Date(pendingLeave)
+      const rejoinedAt = new Date(ev.at)
+      const durationSec = Math.round((rejoinedAt - leftAt) / 1000)
+      rows.push({ leftAt: pendingLeave, reconnectedAt: ev.at, durationSec })
+      pendingLeave = null
+    }
+  })
+
+  // Currently disconnected with no reconnect yet
+  if (pendingLeave) {
+    rows.push({ leftAt: pendingLeave, reconnectedAt: null, durationSec: null })
+  }
+
+  return rows
+}
+
 // ─── COURSE ROSTER ───────────────────────────────────────
 
 export const getCourseEnrollments = async (courseId) => {
@@ -413,11 +492,12 @@ export const getCourseEnrollments = async (courseId) => {
   const snap = await getDocs(q)
   const enrollments = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
 
-  // Backfill the name for any enrollment created before we started saving it.
   await Promise.all(enrollments.map(async (e) => {
-    if (!e.studentName) {
+    if (!e.studentName || !e.studentNumber) {
       const userSnap = await getDoc(doc(db, 'users', e.studentId))
-      e.studentName = userSnap.exists() ? (userSnap.data().name || e.studentId) : e.studentId
+      const userData = userSnap.exists() ? userSnap.data() : {}
+      e.studentName = e.studentName || userData.name || e.studentId
+      e.studentNumber = userData.studentId || e.studentId
     }
   }))
 

@@ -130,18 +130,30 @@ export default function Reports() {
                 ) : (
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <thead><tr style={{ background: 'var(--surface2)' }}>
-                      {['Student', 'Attendance', 'Engagement', 'Level'].map((h) => (
+                      {['Student', 'Attendance', 'Engagement', 'Level', 'Connectivity'].map((h) => (
                         <th key={h} style={{ padding: '9px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>{h}</th>
                       ))}
                     </tr></thead>
                     <tbody>{activeReport.studentRecords.map((s) => (
-                      <tr key={s.studentId} style={{ borderBottom: '1px solid var(--border)' }}>
-                        <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 600 }}>{s.studentName}</td>
-                        <td style={{ padding: '11px 14px' }}><Badge type={s.attendanceStatus} /></td>
-                        <td style={{ padding: '11px 14px' }}><EngagementBar value={s.engagementScore} width={70} /></td>
-                        <td style={{ padding: '11px 14px', fontWeight: 700, color: 'var(--purple)', fontSize: 13 }}>{s.engagementLevel}</td>
-                      </tr>
-                    ))}</tbody>
+  <>
+    <tr key={s.studentId} style={{ borderBottom: (s.connectivityLog?.length || 0) > 0 ? 'none' : '1px solid var(--border)' }}>
+      <td style={{ padding: '11px 14px', fontSize: 13, fontWeight: 600 }}>{s.studentName}</td>
+      <td style={{ padding: '11px 14px' }}><Badge type={s.attendanceStatus} /></td>
+      <td style={{ padding: '11px 14px' }}><EngagementBar value={s.engagementScore} width={70} /></td>
+      <td style={{ padding: '11px 14px', fontWeight: 700, color: 'var(--purple)', fontSize: 13 }}>{s.engagementLevel}</td>
+      <td style={{ padding: '11px 14px', fontSize: 12, fontWeight: 700, color: s.finalConnectionStatus === 'Connected' ? 'var(--green)' : 'var(--red)' }}>
+        {s.finalConnectionStatus || '—'}
+      </td>
+    </tr>
+    {(s.connectivityLog || []).map((row, idx) => (
+      <tr key={s.studentId + '_conn_' + idx} style={{ borderBottom: idx === s.connectivityLog.length - 1 ? '1px solid var(--border)' : 'none', background: 'var(--surface2)' }}>
+        <td colSpan={5} style={{ padding: '8px 14px 8px 28px', fontSize: 12, color: 'var(--text2)' }}>
+          ⚠ Left {new Date(row.leftAt).toLocaleTimeString()} · Reconnected: {row.reconnectedAt ? new Date(row.reconnectedAt).toLocaleTimeString() : 'Not Reconnected'} · Duration outside: {row.durationSec != null ? `${Math.floor(row.durationSec / 60)}m ${row.durationSec % 60}s` : 'Until session end'}
+        </td>
+      </tr>
+    ))}
+  </>
+))}</tbody>
                   </table>
                 )}
               </div>
