@@ -173,34 +173,32 @@ export default function StudentMonitor() {
   }
 
   // ── Phase 2: verified — now add mic and start the real monitoring loop ─
-  const beginFullMonitoring = async () => {
-    try {
-      const currentVideoTrack = streamRef.current?.getVideoTracks()[0]
-      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const combined = new MediaStream([
-        ...(currentVideoTrack ? [currentVideoTrack] : []),
-        ...micStream.getAudioTracks(),
-      ])
-      streamRef.current = combined
-      if (videoRef.current) videoRef.current.srcObject = combined
+ const beginFullMonitoring = async () => {
+  setPhase('monitoring')
+  setSeconds(0)
+  setAlertMsg('')
 
-      setPhase('monitoring')
-      setSeconds(0)
-      setAlertMsg('')
+  timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000)
+  intervalRef.current = setInterval(() => detectAndUpdate(), 3000)
+}
 
-      timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000)
-      intervalRef.current = setInterval(() => detectAndUpdate(), 3000)
+  const enableMicrophone = async () => {
+  try {
+    const micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const currentVideoTrack = streamRef.current?.getVideoTracks()[0]
+    const combined = new MediaStream([
+      ...(currentVideoTrack ? [currentVideoTrack] : []),
+      ...micStream.getAudioTracks(),
+    ])
+    streamRef.current = combined
+    if (videoRef.current) videoRef.current.srcObject = combined
 
-      startAudioCapture(combined)
-      startMicMeter(combined)
-    } catch (e) {
-      setError('Microphone access denied. Monitoring will continue without audio analysis.')
-      setPhase('monitoring')
-      setSeconds(0)
-      timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000)
-      intervalRef.current = setInterval(() => detectAndUpdate(), 3000)
-    }
+    startAudioCapture(combined)
+    startMicMeter(combined)
+  } catch (e) {
+    setError('Microphone access denied.')
   }
+}
 
   const startAudioCapture = (stream) => {
     const audioTracks = stream.getAudioTracks()
@@ -543,19 +541,25 @@ export default function StudentMonitor() {
                 <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--green)' }}>Present ✓</span>
               </div>
               <div style={{ marginTop: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text2)' }}>
-                    Microphone {micStatus === 'active' ? '(Active)' : '(Inactive)'}
-                  </span>
-                </div>
-                <div style={{ background: 'var(--surface2)', borderRadius: 4, height: 8, overflow: 'hidden' }}>
-                  <div style={{
-                    width: micLevel + '%', height: '100%', borderRadius: 4,
-                    background: micLevel > 5 ? '#16A34A' : '#4A5568',
-                    transition: 'width .1s linear',
-                  }} />
-                </div>
-              </div>
+  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+    <span style={{ fontSize: 12, color: 'var(--text2)' }}>
+      Microphone {micStatus === 'active' ? '(Active)' : '(Inactive)'}
+    </span>
+  </div>
+  <div style={{ background: 'var(--surface2)', borderRadius: 4, height: 8, overflow: 'hidden' }}>
+    <div style={{
+      width: micLevel + '%', height: '100%', borderRadius: 4,
+      background: micLevel > 5 ? '#16A34A' : '#4A5568',
+      transition: 'width .1s linear',
+    }} />
+  </div>
+  {micStatus !== 'active' && (
+    <button onClick={enableMicrophone}
+      style={{ marginTop: 8, width: '100%', padding: '8px', background: '#7C3AED', color: '#fff', borderRadius: 8, fontWeight: 700, fontSize: 12, border: 'none', cursor: 'pointer' }}>
+      🎤 Turn On Microphone
+    </button>
+  )}
+</div>
             </div>
           )}
 
