@@ -27,6 +27,7 @@ export default function StudentMonitor() {
   const [alertMsg, setAlertMsg]             = useState('')
   const [micLevel, setMicLevel] = useState(0)
   const [micStatus, setMicStatus] = useState('inactive')
+  const [micEnabled, setMicEnabled] = useState(false)
 
   const streamRef       = useRef(null)
   const intervalRef     = useRef(null)
@@ -43,6 +44,7 @@ export default function StudentMonitor() {
   const analyserRef = useRef(null)
   const micLevelIntervalRef = useRef(null)
   const speechLanguageRef = useRef('sinhala')
+  const micEnabledRef = useRef(false)
 
   useEffect(() => {
     const load = async () => {
@@ -195,9 +197,38 @@ export default function StudentMonitor() {
 
     startAudioCapture(combined)
     startMicMeter(combined)
+    micEnabledRef.current = true
+    setMicEnabled(true)
   } catch (e) {
     setError('Microphone access denied.')
   }
+}
+const disableMicrophone = () => {
+  micEnabledRef.current = false
+  if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+    try {
+      mediaRecorderRef.current.stop()
+    } catch (e) {}
+  }
+
+  mediaRecorderRef.current = null
+
+  if (streamRef.current) {
+    streamRef.current.getAudioTracks().forEach((track) => track.stop())
+
+    const videoTrack = streamRef.current.getVideoTracks()[0]
+
+    streamRef.current = videoTrack
+      ? new MediaStream([videoTrack])
+      : null
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = streamRef.current
+    }
+  }
+
+  stopMicMeter()
+  setMicEnabled(false)
 }
 
   const startAudioCapture = (stream) => {
@@ -227,7 +258,7 @@ export default function StudentMonitor() {
   } catch (e) {
     console.warn('Speech prediction failed for this segment:', e)
   }
-  if (streamRef.current) recordSegment()
+  if (micEnabledRef.current && streamRef.current) recordSegment()
 }
 
       recorder.start()
@@ -265,6 +296,8 @@ export default function StudentMonitor() {
   }
 
   const stopMonitoring = async () => {
+    micEnabledRef.current = false
+setMicEnabled(false)
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop())
       streamRef.current = null
@@ -553,12 +586,43 @@ export default function StudentMonitor() {
       transition: 'width .1s linear',
     }} />
   </div>
-  {micStatus !== 'active' && (
-    <button onClick={enableMicrophone}
-      style={{ marginTop: 8, width: '100%', padding: '8px', background: '#7C3AED', color: '#fff', borderRadius: 8, fontWeight: 700, fontSize: 12, border: 'none', cursor: 'pointer' }}>
-      🎤 Turn On Microphone
-    </button>
-  )}
+  {!micEnabled ? (
+  <button
+    onClick={enableMicrophone}
+    style={{
+      marginTop: 8,
+      width: '100%',
+      padding: '8px',
+      background: '#7C3AED',
+      color: '#fff',
+      borderRadius: 8,
+      fontWeight: 700,
+      fontSize: 12,
+      border: 'none',
+      cursor: 'pointer'
+    }}
+  >
+    🎤 Turn On Microphone
+  </button>
+) : (
+  <button
+    onClick={disableMicrophone}
+    style={{
+      marginTop: 8,
+      width: '100%',
+      padding: '8px',
+      background: '#DC2626',
+      color: '#fff',
+      borderRadius: 8,
+      fontWeight: 700,
+      fontSize: 12,
+      border: 'none',
+      cursor: 'pointer'
+    }}
+  >
+    🔴 Turn Off Microphone
+  </button>
+)}
 </div>
             </div>
           )}
